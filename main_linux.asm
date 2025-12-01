@@ -1,42 +1,69 @@
-global _start
+global main
 extern new_array
 extern push_element
 extern remove_at
 extern insert_at
 extern sum_array
 extern free_array
+extern min_array
+extern max_array
+
+section .data
+array_ptr dq 0
 
 section .text
-_start:
+main:
+    push rbp
+    mov rbp, rsp
+    
+    ; new_array(4)
     mov rdi, 4
     call new_array
-    mov rbx, rax
+    mov [rel array_ptr], rax
 
-    mov rdi, rbx
+    ; push_element(&array_ptr, 10)
+    lea rdi, [rel array_ptr]
     mov esi, 10
     call push_element
-    mov rdi, rbx
+    
+    ; push_element(&array_ptr, 20)
+    lea rdi, [rel array_ptr]
     mov esi, 20
     call push_element
-    mov rdi, rbx
+    
+    ; push_element(&array_ptr, 30)
+    lea rdi, [rel array_ptr]
     mov esi, 30
     call push_element
 
-    mov rdi, rbx
+    ; remove_at(&array_ptr, 1)
+    lea rdi, [rel array_ptr]
     mov rsi, 1
     call remove_at
 
-    mov rdi, rbx
+    ; insert_at(&array_ptr, 1, 25)
+    lea rdi, [rel array_ptr]
     mov rsi, 1
     mov edx, 25
     call insert_at
 
-    mov rdi, rbx
+    ; sum_array(array_ptr)
+    mov rdi, [rel array_ptr]
     call sum_array
 
-    mov rdi, rbx
+    ; min_array(array_ptr)
+    mov rdi, [rel array_ptr]
+    call min_array
+
+    ; max_array(array_ptr)
+    mov rdi, [rel array_ptr]
+    call max_array
+
+    ; free_array(array_ptr)
+    mov rdi, [rel array_ptr]
     call free_array
 
-    mov rax, 60
-    xor rdi, rdi
-    syscall
+    ; return 0
+    xor eax, eax
+    pop rbp
+    ret

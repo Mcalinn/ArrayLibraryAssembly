@@ -1,3 +1,31 @@
-.test_program.exe
-.main.obj
-.array_lib.obj
+# Compiled executables
+*.exe
+test_program
+test_program.exe
+
+# Object files
+*.o
+*.obj
+main.o
+array_lib.o
+
+# Debug files
+*.pdb
+*.ilk
+*.cv8
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.bak
