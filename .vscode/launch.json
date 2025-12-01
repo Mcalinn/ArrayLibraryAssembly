@@ -1,0 +1,18 @@
+{
+    "version": "2.0.0",
+    "configurations": [
+        {
+            "name": "Run test_program",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/test_program",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": true,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb"
+        }
+    ]
+}
