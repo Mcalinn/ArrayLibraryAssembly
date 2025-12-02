@@ -12,7 +12,8 @@ fmt_free_entry db "free_array entry: %p",10,0
 fmt_free_exit  db "free_array exit: %p",10,0
 fmt_resize_entry db "resize_array entry: old=%p new_cap=%u",10,0
 fmt_resize_exit  db "resize_array exit: new=%p",10,0
-fmt_min_dbg db "min_array dbg: size=%llu first=%u",10,0
+fmt_min_result db "min_array result: %u",10,0
+fmt_max_result db "max_array result: %u",10,0
 
 section .text
 
@@ -427,8 +428,10 @@ sum_array:
 
 ; ---------------------------
 ; min_array
-; accepts RCX = Array* (Windows ABI), returns value in RAX (32-bit in EAX)
+; accepts RCX = Array* (Windows ABI) or RDI (Linux), returns value in RAX (32-bit in EAX)
 min_array:
+    push rbp
+    mov rbp, rsp
 %if IS_WIN64
     mov rdi, rcx
 %endif
@@ -451,15 +454,36 @@ min_array:
     add rsi, 4
     dec rcx
     jnz .min_loop
+    ; log result
+%if IS_WIN64
+    push rax                    ; save result
+    sub rsp, 32                 ; shadow space
+    lea rcx, [rel fmt_min_result]
+    mov edx, eax                ; result as second arg
+    call printf
+    add rsp, 32
+    pop rax                     ; restore result
+%else
+    push rax                    ; save result
+    mov esi, eax                ; result as second arg
+    lea rdi, [rel fmt_min_result]
+    xor eax, eax                ; printf varargs requirement
+    call printf
+    pop rax                     ; restore result
+%endif
+    pop rbp
     ret
 .min_ret_zero:
     xor eax, eax
+    pop rbp
     ret
 
 ; ---------------------------
 ; max_array
-; accepts RCX = Array* (Windows ABI), returns value in RAX (32-bit in EAX)
+; accepts RCX = Array* (Windows ABI) or RDI (Linux), returns value in RAX (32-bit in EAX)
 max_array:
+    push rbp
+    mov rbp, rsp
 %if IS_WIN64
     mov rdi, rcx
 %endif
@@ -482,7 +506,26 @@ max_array:
     add rsi, 4
     dec rcx
     jnz .max_loop
+    ; log result
+%if IS_WIN64
+    push rax                    ; save result
+    sub rsp, 32                 ; shadow space
+    lea rcx, [rel fmt_max_result]
+    mov edx, eax                ; result as second arg
+    call printf
+    add rsp, 32
+    pop rax                     ; restore result
+%else
+    push rax                    ; save result
+    mov esi, eax                ; result as second arg
+    lea rdi, [rel fmt_max_result]
+    xor eax, eax                ; printf varargs requirement
+    call printf
+    pop rax                     ; restore result
+%endif
+    pop rbp
     ret
 .max_ret_zero:
     xor eax, eax
+    pop rbp
     ret
