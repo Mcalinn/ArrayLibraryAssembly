@@ -16,6 +16,13 @@ fmt_min_dbg db "min_array dbg: size=%llu first=%u",10,0
 
 section .text
 
+; Detect output format to switch calling convention handling
+%ifidni __OUTPUT_FORMAT__, win64
+%define IS_WIN64 1
+%else
+%define IS_WIN64 0
+%endif
+
 ; ---------------------------
 ; Exported functions
 global new_array
@@ -43,7 +50,9 @@ section .text
 new_array:
     push rbp
     mov rbp, rsp
+%if IS_WIN64
     mov rdi, rcx
+%endif
     mov rax, rdi
     test rax, rax
     jnz .have_cap
@@ -52,9 +61,14 @@ new_array:
     mov rcx, rax
     shl rcx, 2
     add rcx, 16
+%if IS_WIN64
     sub rsp, 32
     call malloc
     add rsp, 32
+%else
+    ; SysV: ensure 16-byte alignment is maintained by caller; call directly
+    call malloc
+%endif
     test rax, rax
     jz .done_new
     xor rdx, rdx
@@ -70,26 +84,37 @@ new_array:
 ; ---------------------------
 ; free_array
 free_array:
+%if IS_WIN64
     mov rdi, rcx
+%endif
     test rdi, rdi
     jz .fret
     ; log entry
+%if IS_WIN64
     lea rcx, [rel fmt_free_entry]
     mov rdx, rdi
     sub rsp, 32
     call printf
     add rsp, 32
+%endif
     ; call free
+%if IS_WIN64
     mov rcx, rdi
     sub rsp, 32
     call free
     add rsp, 32
+%else
+    mov rdi, rdi
+    call free
+%endif
     ; log exit
+%if IS_WIN64
     lea rcx, [rel fmt_free_exit]
     mov rdx, rdi
     sub rsp, 32
     call printf
     add rsp, 32
+%endif
 .fret:
     ret
 
@@ -99,8 +124,10 @@ free_array:
 ; returns rax = new_ptr
 resize_array:
     ; adapt Windows caller: RCX = old_array, RDX = new_capacity
+%if IS_WIN64
     mov rdi, rcx
     mov rsi, rdx
+%endif
     push rbp
     mov rbp, rsp
     push rbx
@@ -110,12 +137,14 @@ resize_array:
     mov r14, rdi
     mov r12, rsi
     ; log entry (old pointer in r14, new cap in r12)
+%if IS_WIN64
     lea rcx, [rel fmt_resize_entry]
     mov rdx, r14
     mov r8d, r12d
     sub rsp, 40
     call printf
     add rsp, 40
+%endif
     test r12, r12
     jnz .cap_ok
     mov r12, 4
@@ -123,10 +152,15 @@ resize_array:
     mov rax, r12
     shl rax, 2
     add rax, 16
+%if IS_WIN64
     mov rcx, rax
     sub rsp, 32
     call malloc
     add rsp, 32
+%else
+    mov rdi, rax
+    call malloc
+%endif
     test rax, rax
     jz .oom
     mov r13, rax
@@ -151,21 +185,31 @@ resize_array:
 .copy_done:
     mov [r13], rax
     mov [r13 + 8], r12
+%if IS_WIN64
     mov rcx, r14
+%else
+    mov rdi, r14
+%endif
     test rcx, rcx
     jz .finish
+%if IS_WIN64
     sub rsp, 40
     call free
     add rsp, 40
+%else
+    call free
+%endif
 .finish:
     mov rax, r13
     mov rdi, r14
     ; log exit (new pointer in r13)
+%if IS_WIN64
     lea rcx, [rel fmt_resize_exit]
     mov rdx, r13
     sub rsp, 32
     call printf
     add rsp, 32
+%endif
     pop r14
     pop r13
     pop r12
@@ -187,8 +231,10 @@ push_element:
     mov rbp, rsp
     push rbx
     push r12
+%if IS_WIN64
     mov rdi, rcx
     mov esi, edx
+%endif
     mov r12, rdi
     mov rax, [r12]
     test rax, rax
@@ -210,11 +256,17 @@ push_element:
     mov rcx, 4
 .do_resize:
     ; pass parameters for resize_array: RCX = old_array, RDX = new_capacity
+%if IS_WIN64
     mov rdx, rcx
     mov rcx, [r12]
     sub rsp, 40
     call resize_array
     add rsp, 40
+%else
+    mov rsi, rcx
+    mov rdi, [r12]
+    call resize_array
+%endif
     test rax, rax
     jz .oom
     mov [r12], rax
@@ -240,8 +292,10 @@ remove_at:
     mov rbp, rsp
     push rbx
     push r12
+%if IS_WIN64
     mov rdi, rcx
     mov rsi, rdx
+%endif
     mov r12, rdi
     mov rax, [r12]
     test rax, rax
@@ -277,9 +331,15 @@ insert_at:
     push rbx
     push r12
     push r13
+%if IS_WIN64
     mov r12, rcx
     mov r13, rdx
     mov ebx, r8d
+%else
+    mov r12, rdi
+    mov r13, rsi
+    mov ebx, edx
+%endif
     mov rax, [r12]
     test rax, rax
     mov rax, [r12]
@@ -346,7 +406,9 @@ insert_at:
 sum_array:
 sum_array:
     ; accept RCX as parameter (Windows ABI) and move to RDI for existing logic
+%if IS_WIN64
     mov rdi, rcx
+%endif
     xor rax, rax
     test rdi, rdi
     jz .sum_ret
@@ -367,7 +429,9 @@ sum_array:
 ; min_array
 ; accepts RCX = Array* (Windows ABI), returns value in RAX (32-bit in EAX)
 min_array:
+%if IS_WIN64
     mov rdi, rcx
+%endif
     xor eax, eax
     test rdi, rdi
     jz .min_ret_zero
@@ -407,7 +471,9 @@ min_array:
 ; max_array
 ; accepts RCX = Array* (Windows ABI), returns value in RAX (32-bit in EAX)
 max_array:
+%if IS_WIN64
     mov rdi, rcx
+%endif
     xor eax, eax
     test rdi, rdi
     jz .max_ret_zero
