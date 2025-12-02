@@ -440,17 +440,6 @@ min_array:
     test rcx, rcx
     jz .min_ret_zero
     mov eax, [rsi]
-    ; debug print size and first element
-    push rax            ; save first element (in eax)
-    push rcx            ; save size
-    sub rsp, 32         ; shadow space
-    mov rdx, rcx        ; second arg: size
-    mov r8d, eax        ; third arg: first element (32-bit)
-    lea rcx, [rel fmt_min_dbg] ; format
-    call printf
-    add rsp, 32
-    pop rcx             ; restore size
-    pop rax             ; restore first element
     dec rcx
     add rsi, 4
 .min_loop:
