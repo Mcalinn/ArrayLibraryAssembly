@@ -66,7 +66,8 @@ new_array:
     call malloc
     add rsp, 32
 %else
-    ; SysV: ensure 16-byte alignment is maintained by caller; call directly
+    ; SysV: RDI = size for malloc
+    mov rdi, rcx
     call malloc
 %endif
     test rax, rax
@@ -104,7 +105,7 @@ free_array:
     call free
     add rsp, 32
 %else
-    mov rdi, rdi
+    ; RDI already holds the pointer
     call free
 %endif
     ; log exit
@@ -187,16 +188,15 @@ resize_array:
     mov [r13 + 8], r12
 %if IS_WIN64
     mov rcx, r14
-%else
-    mov rdi, r14
-%endif
     test rcx, rcx
     jz .finish
-%if IS_WIN64
     sub rsp, 40
     call free
     add rsp, 40
 %else
+    mov rdi, r14
+    test rdi, rdi
+    jz .finish
     call free
 %endif
 .finish:
