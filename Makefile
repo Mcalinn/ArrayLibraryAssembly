@@ -14,3 +14,4 @@ all:
 	nasm -f $(NASM_FMT) $(MAIN) -o main.$(OBJ_EXT)
 	nasm -f $(NASM_FMT) array_lib.asm -o array_lib.$(OBJ_EXT)
 	gcc main.$(OBJ_EXT) array_lib.$(OBJ_EXT) -o $(OUT)
+ 
