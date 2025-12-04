@@ -1,6 +1,28 @@
 ; array_lib.asm
-; NASM x86-64 (Win64)
-; Requires linking with C runtime (malloc/free)
+; ============================================================================
+; NASM x86-64 Dynamic Array Library
+; 
+; Supports: Windows (Win64 ABI) and Linux (SysV ABI)
+; Auto-detection: %ifidni __OUTPUT_FORMAT__, win64
+;
+; MEMORY LAYOUT:
+;   [ptr + 0]   = size (uint64_t) — current number of elements
+;   [ptr + 8]   = capacity (uint64_t) — max elements before realloc
+;   [ptr + 16]  = data[] — array of uint32_t elements
+;
+; KEY RULES:
+;   1. Stack alignment: 16-byte alignment BEFORE any function call
+;   2. Windows shadow space: 32 bytes before malloc/free/printf
+;   3. Linux varargs: xor eax,eax before printf (# vector registers)
+;   4. All pointer parameters use pointer-to-pointer (Array**) for push/insert/remove
+;      so the caller's array_ptr can be updated if reallocation happens
+;
+; COMMON MISTAKES:
+;   - Not aligning stack → crashes on malloc/free/printf
+;   - Mixing RCX/RDI between platforms → ABI mismatch → segfault
+;   - Not restoring clobbered registers (RBX, R12–R15) → corruption
+;   - Off-by-one in loops or array indexing → buffer overflow
+; ============================================================================
 
 default rel
 extern malloc
@@ -8,6 +30,7 @@ extern free
 extern printf
 
 section .data
+; Format strings for diagnostic output (can be removed for release builds)
 fmt_free_entry db "free_array entry: %p",10,0
 fmt_free_exit  db "free_array exit: %p",10,0
 fmt_resize_entry db "resize_array entry: old=%p new_cap=%u",10,0
@@ -45,41 +68,65 @@ global sort_array
 section .text
 
 ; ---------------------------
-; new_array
-; rdi = initial_capacity
-; returns rax = pointer
+; new_array(capacity)
+; PURPOSE: Allocate a new array structure with given capacity
+;
+; WINDOWS ABI:
+;   Input:  RCX = initial_capacity (uint64_t)
+;   Output: RAX = Array* (pointer to allocated block) or 0 on malloc failure
+;
+; LINUX ABI:
+;   Input:  RDI = initial_capacity
+;   Output: RAX = Array* or 0 on failure
+;
+; BEHAVIOR:
+;   - If capacity is 0, defaults to 4 elements
+;   - Allocates: 16 bytes (metadata) + capacity * 4 bytes (data)
+;   - Initializes: size = 0, capacity = requested_capacity
+;
+; ERROR CASES:
+;   - malloc() fails → returns 0 (must check RAX before use!)
+;
+; POTENTIAL BUGS:
+;   - If you change the multiplier (shl rcx, 2 = *4), check element size expectations
+;   - Capacity overflow: very large capacity * 4 might exceed heap → malloc fails silently
+; ---------------------------
 new_array:
     push rbp
     mov rbp, rsp
 %if IS_WIN64
-    mov rdi, rcx
+    mov rdi, rcx            ; Convert Win64 parameter to RDI (shared logic below)
 %endif
     mov rax, rdi
-    test rax, rax
+    test rax, rax           ; Check if capacity == 0
     jnz .have_cap
-    mov rax, 4
+    mov rax, 4              ; Default capacity if 0
 .have_cap:
-    mov rcx, rax
-    shl rcx, 2
-    add rcx, 16
+    mov rcx, rax            ; RCX = capacity
+    shl rcx, 2              ; RCX *= 4 (each element is uint32_t = 4 bytes)
+    add rcx, 16             ; RCX += 16 (metadata: size + capacity)
+                            ; Now RCX = total bytes needed
 %if IS_WIN64
-    sub rsp, 32
-    call malloc
+    sub rsp, 32             ; Windows: reserve shadow space
+    call malloc             ; RCX = size_to_allocate
     add rsp, 32
 %else
-    ; SysV: RDI = size for malloc
+    ; Linux: RDI = size for malloc
     mov rdi, rcx
-    call malloc
+    call malloc             ; RDI = size_to_allocate
 %endif
-    test rax, rax
-    jz .done_new
-    xor rdx, rdx
-    mov [rax], rdx
+    test rax, rax           ; Check malloc success
+    jz .done_new            ; If malloc failed (RAX=0), return 0
+    
+    ; Initialize metadata (only if malloc succeeded)
+    xor rdx, rdx            ; RDX = 0
+    mov [rax], rdx          ; array->size = 0
     mov rdx, rcx
-    sub rdx, 16
-    shr rdx, 2
-    mov [rax + 8], rdx
+    sub rdx, 16             ; RDX = (total_bytes - 16) = data_size
+    shr rdx, 2              ; RDX = data_size / 4 = capacity (convert bytes to elements)
+    mov [rax + 8], rdx      ; array->capacity = capacity
 .done_new:
+    ; RAX already contains result (pointer or 0)
     pop rbp
     ret
 
@@ -226,7 +273,25 @@ resize_array:
     jmp .finish
 
 ; ---------------------------
-; push_element
+; push_element(&ptr, value)
+; PURPOSE: Add element to end; auto-resize if capacity full
+;
+; WINDOWS ABI:  RCX = &array_ptr (Array**), RDX = value (uint32_t)
+; LINUX ABI:    RDI = &array_ptr (Array**), ESI = value (uint32_t)
+;
+; KEY: Takes POINTER-TO-POINTER so reallocation updates caller's pointer!
+;      Without this, realloc would move buffer but caller wouldn't know.
+;
+; BEHAVIOR:
+;   1. If array NULL or full (size == capacity), resize to capacity*2
+;   2. Place value at data[size], increment size
+;
+; POTENTIAL BUGS:
+;   - Off-by-one in loop: check cmp/jb boundaries
+;   - Doubling strategy wastes memory on many small pushes
+;   - Stack alignment issues if RSP not % 16 == 0 before malloc/resize calls
+;
+; ---------------------------
 push_element:
     push rbp
     mov rbp, rsp
@@ -287,6 +352,32 @@ push_element:
     ret
 
 ; ---------------------------
+; remove_at(&ptr, index)
+; PURPOSE: Delete element at given index; shift remaining elements left
+;
+; WINDOWS ABI:  RCX = &array_ptr (Array**), RDX = index (uint64_t)
+; LINUX ABI:    RDI = &array_ptr (Array**), RSI = index
+;
+; BEHAVIOR:
+;   1. Check if index >= size (ignore if true)
+;   2. Shift elements [index+1 .. size-1] one position left
+;   3. Decrement size
+;
+; SHIFTING PATTERN (important!):
+;   for (i = index; i < size-1; i++)
+;     data[i] = data[i+1]
+;   
+;   Off-by-one errors here cause:
+;   - Duplicate elements
+;   - Lost elements
+;   - Buffer overrun
+;
+; POTENTIAL BUGS:
+;   - Using 32-bit counter when size is 64-bit → only removes first 2^32 elements
+;   - Not updating size → effectively memory leak (space never reused)
+;   - Shifting backwards instead of forward → double-delete
+;
+; ---------------------------
 ; remove_at
 remove_at:
     push rbp
@@ -324,6 +415,31 @@ remove_at:
     pop rbp
     ret
 
+; ---------------------------
+; insert_at(&ptr, index, value)
+; PURPOSE: Insert element at index; shift remaining elements right
+;
+; WINDOWS ABI:  RCX = &array_ptr (Array**), RDX = index (uint64_t), R8D = value (uint32_t)
+; LINUX ABI:    RDI = &array_ptr (Array**), RSI = index, EDX = value
+;
+; BEHAVIOR:
+;   1. If index > size, insert at end (append)
+;   2. Resize if needed (same as push_element)
+;   3. Shift elements [index .. size-1] one position RIGHT
+;   4. Place value at data[index]
+;   5. Increment size
+;
+; SHIFTING PATTERN (backward to avoid overwrite):
+;   for (i = size-1; i >= index; i--)  // BACKWARD!
+;     data[i+1] = data[i]
+;
+;   Must go BACKWARD, not forward, or else we overwrite our own data!
+;
+; POTENTIAL BUGS:
+;   - Shifting forward instead of backward → data loss!
+;   - Not clamping index to size → inserting "past the end" works but is confusing
+;   - Off-by-one in shift loop boundaries
+;
 ; ---------------------------
 ; insert_at
 insert_at:
@@ -403,7 +519,28 @@ insert_at:
     ret
 
 ; ---------------------------
-; sum_array
+; sum_array(ptr)
+; PURPOSE: Calculate sum of all elements
+;
+; WINDOWS ABI:  RCX = Array*
+; LINUX ABI:    RDI = Array*
+;
+; RETURNS: RAX = sum (uint64_t)
+;
+; BEHAVIOR:
+;   1. If NULL or empty, return 0
+;   2. Iterate through all elements, accumulate sum in RAX
+;
+; POTENTIAL BUGS:
+;   - Sum overflow: if elements are large, sum can wrap (uint64_t max ≈ 18e18)
+;     No error checking → silent overflow!
+;   - Size corruption: if size is garbage, loop might iterate past allocated buffer
+;
+; IMPROVEMENT IDEAS:
+;   - Check for overflow and set error flag
+;   - Add optional max sum parameter to detect bugs
+;
+; ---------------------------
 sum_array:
 sum_array:
     ; accept RCX as parameter (Windows ABI) and move to RDI for existing logic
@@ -413,19 +550,44 @@ sum_array:
     xor rax, rax
     test rdi, rdi
     jz .sum_ret
-    mov rcx, [rdi]
-    lea rsi, [rdi + 16]
+    mov rcx, [rdi]          ; RCX = size
+    lea rsi, [rdi + 16]     ; RSI = &data[0]
     test rcx, rcx
     jz .sum_ret
 .sum_loop:
-    mov edx, [rsi]
-    add rax, rdx
+    mov edx, [rsi]          ; EDX = data[i]
+    add rax, rdx            ; RAX += data[i]
     add rsi, 4
     dec rcx
     jnz .sum_loop
 .sum_ret:
     ret
 
+; ---------------------------
+; min_array(ptr)
+; PURPOSE: Find minimum element in array
+;
+; WINDOWS ABI:  RCX = Array*
+; LINUX ABI:    RDI = Array*
+;
+; RETURNS: EAX = min value (uint32_t), or 0 if empty/NULL
+;
+; BEHAVIOR:
+;   1. If NULL or empty, return 0 (AMBIGUOUS! Could also mean min value IS 0)
+;   2. Load first element as initial min
+;   3. Compare all other elements, keep smallest
+;
+; POTENTIAL BUGS:
+;   - Return value 0 is ambiguous: could mean empty OR min is actually 0
+;     Caller can't distinguish! Consider returning special value (-1) for empty
+;   - Size corruption: if size is wrong, might iterate past buffer
+;   - Comparison logic (jge): must be STRICTLY GREATER to avoid comparing with self
+;
+; IMPROVEMENT IDEAS:
+;   - Return -1 or UINT_MAX for error cases
+;   - Add optional error pointer parameter
+;   - Consider alternative comparison (jle vs jge)
+;
 ; ---------------------------
 ; min_array
 ; accepts RCX = Array* (Windows ABI) or RDI (Linux), returns value in RAX (32-bit in EAX)
@@ -435,21 +597,21 @@ min_array:
 %if IS_WIN64
     mov rdi, rcx
 %endif
-    xor eax, eax
-    test rdi, rdi
+    xor eax, eax            ; EAX = 0 (default return)
+    test rdi, rdi           ; Check if NULL
     jz .min_ret_zero
-    mov rcx, [rdi]
-    lea rsi, [rdi + 16]
-    test rcx, rcx
+    mov rcx, [rdi]          ; RCX = size
+    lea rsi, [rdi + 16]     ; RSI = &data[0]
+    test rcx, rcx           ; Check if empty
     jz .min_ret_zero
-    mov eax, [rsi]
-    dec rcx
-    add rsi, 4
+    mov eax, [rsi]          ; EAX = data[0] (initial min)
+    dec rcx                 ; RCX-- (we already processed first element)
+    add rsi, 4              ; RSI = &data[1]
 .min_loop:
-    mov edx, [rsi]
-    cmp edx, eax
-    jge .min_nochange
-    mov eax, edx
+    mov edx, [rsi]          ; EDX = data[i]
+    cmp edx, eax            ; Compare with current min
+    jge .min_nochange       ; If edx >= eax, keep current min
+    mov eax, edx            ; Else update min
 .min_nochange:
     add rsi, 4
     dec rcx
@@ -479,6 +641,25 @@ min_array:
     ret
 
 ; ---------------------------
+; max_array(ptr)
+; PURPOSE: Find maximum element in array
+;
+; WINDOWS ABI:  RCX = Array*
+; LINUX ABI:    RDI = Array*
+;
+; RETURNS: EAX = max value (uint32_t), or 0 if empty/NULL
+;
+; BEHAVIOR:
+;   Same as min_array but with reversed comparison:
+;   - If edx <= eax, keep current max
+;   - If edx > eax, update to new max
+;
+; POTENTIAL BUGS:
+;   - Same as min_array: return 0 is ambiguous
+;   - Comparison must be jle (less-or-equal) not jge
+;     Wrong comparison → returns min instead of max!
+;
+; ---------------------------
 ; max_array
 ; accepts RCX = Array* (Windows ABI) or RDI (Linux), returns value in RAX (32-bit in EAX)
 max_array:
@@ -487,21 +668,21 @@ max_array:
 %if IS_WIN64
     mov rdi, rcx
 %endif
-    xor eax, eax
-    test rdi, rdi
+    xor eax, eax            ; EAX = 0 (default return)
+    test rdi, rdi           ; Check if NULL
     jz .max_ret_zero
-    mov rcx, [rdi]
-    lea rsi, [rdi + 16]
-    test rcx, rcx
+    mov rcx, [rdi]          ; RCX = size
+    lea rsi, [rdi + 16]     ; RSI = &data[0]
+    test rcx, rcx           ; Check if empty
     jz .max_ret_zero
-    mov eax, [rsi]
-    dec rcx
-    add rsi, 4
+    mov eax, [rsi]          ; EAX = data[0] (initial max)
+    dec rcx                 ; RCX-- (we already processed first element)
+    add rsi, 4              ; RSI = &data[1]
 .max_loop:
-    mov edx, [rsi]
-    cmp edx, eax
-    jle .max_nochange
-    mov eax, edx
+    mov edx, [rsi]          ; EDX = data[i]
+    cmp edx, eax            ; Compare with current max
+    jle .max_nochange       ; If edx <= eax, keep current max (different from min!)
+    mov eax, edx            ; Else update max
 .max_nochange:
     add rsi, 4
     dec rcx
